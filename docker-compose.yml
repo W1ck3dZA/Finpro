@@ -1,0 +1,30 @@
+services:
+  finpro-backend:
+    container_name: finpro-backend
+    networks:
+      - local-bridge
+    build:
+      context: ./backend
+    env_file:
+      - ./backend/.env.docker
+    ports:
+      - "4000:4000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  finpro-frontend:
+    container_name: finpro-frontend
+    networks:
+      - local-bridge
+    build:
+      context: ./frontend
+    environment:
+      API_PROXY_TARGET: http://finpro-backend:4000
+    ports:
+      - "80:5173"
+    depends_on:
+      - finpro-backend
+
+networks:
+  local-bridge:
+    name: local-bridge
