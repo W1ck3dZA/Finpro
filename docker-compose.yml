@@ -1,5 +1,6 @@
 services:
   finpro-backend:
+    image: finpro-backend
     container_name: finpro-backend
     networks:
       - local-bridge
@@ -13,6 +14,7 @@ services:
       - "host.docker.internal:host-gateway"
 
   finpro-frontend:
+    image: finpro-frontend
     container_name: finpro-frontend
     networks:
       - local-bridge
@@ -28,3 +30,4 @@ services:
 networks:
   local-bridge:
     name: local-bridge
+    external: true
