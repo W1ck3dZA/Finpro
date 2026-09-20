@@ -10,6 +10,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: true,
+    allowedHosts: ['finpro-portal.cloudvoice.network'],
     proxy: {
       '/api': {
         target: apiProxyTarget,
