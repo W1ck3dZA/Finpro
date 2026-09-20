@@ -23,7 +23,7 @@ services:
     environment:
       API_PROXY_TARGET: http://finpro-backend:4000
     ports:
-      - "80:5173"
+      - "8081:5173"
     depends_on:
       - finpro-backend
 
