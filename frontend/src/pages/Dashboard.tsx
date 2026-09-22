@@ -4,7 +4,7 @@ import { Grid, Typography, Paper, Box, CircularProgress, Stack, Chip, ToggleButt
 import { LineChart } from "@mui/x-charts/LineChart";
 import { BarChart } from "@mui/x-charts/BarChart";
 import { DataGrid, type GridColDef } from "@mui/x-data-grid";
-import dayjs, { type ManipulateType } from "dayjs";
+import dayjs from "dayjs";
 import { KpiCard, type Trend } from "../components/KpiCard";
 import { listClients } from "../api/clients";
 import { listJobs } from "../api/jobs";
@@ -39,16 +39,18 @@ function trendPct(current: number, previous: number): number | null {
   return ((current - previous) / previous) * 100;
 }
 
-type Range = "day" | "week" | "month" | "year";
+type Range = "lastMonth" | "last3Months" | "last6Months" | "year";
 
-// Each range is the CURRENT calendar period (so far), not a trailing lookback window.
-// The trend chart buckets at a finer granularity than the period itself so a single-day or
-// single-month selection still produces a meaningful line rather than one lone point.
-const RANGE_CONFIG: Record<Range, { label: string; compareLabel: string; startOfUnit: ManipulateType; interval: TrendInterval }> = {
-  day: { label: "Today", compareLabel: "vs yesterday", startOfUnit: "day", interval: "day" },
-  week: { label: "This Week", compareLabel: "vs last week", startOfUnit: "week", interval: "day" },
-  month: { label: "This Month", compareLabel: "vs last month", startOfUnit: "month", interval: "day" },
-  year: { label: "This Year", compareLabel: "vs last year", startOfUnit: "year", interval: "month" },
+// Data only gets imported up to the end of the previous month, so every range is a trailing
+// window of whole months ending at the end of last month — never "so far this month", which
+// would always show as empty or misleadingly low. The trend chart buckets at a finer granularity
+// than the window itself so a single-month selection still produces a meaningful line rather than
+// one lone point.
+const RANGE_CONFIG: Record<Range, { label: string; compareLabel: string; monthsBack: number; interval: TrendInterval }> = {
+  lastMonth: { label: "Last Month", compareLabel: "vs previous month", monthsBack: 1, interval: "day" },
+  last3Months: { label: "Last 3 Months", compareLabel: "vs previous 3 months", monthsBack: 3, interval: "week" },
+  last6Months: { label: "Last 6 Months", compareLabel: "vs previous 6 months", monthsBack: 6, interval: "week" },
+  year: { label: "Last 12 Months", compareLabel: "vs previous 12 months", monthsBack: 12, interval: "month" },
 };
 
 interface PeriodTotals {
@@ -67,7 +69,7 @@ function extractTotals(analyticsRes: AnalyticsResponse, staffHoursRes: TimeRepor
 
 export function Dashboard() {
   const navigate = useNavigate();
-  const [range, setRange] = useState<Range>("month");
+  const [range, setRange] = useState<Range>("lastMonth");
   const [loading, setLoading] = useState(true);
   const [totalClients, setTotalClients] = useState(0);
   const [analytics, setAnalytics] = useState<AnalyticsResponse | null>(null);
@@ -90,17 +92,15 @@ export function Dashboard() {
 
   useEffect(() => {
     const config = RANGE_CONFIG[range];
-    const periodStart = dayjs().startOf(config.startOfUnit);
-    const today = dayjs();
-    const from = periodStart.format("YYYY-MM-DD");
-    const to = today.format("YYYY-MM-DD");
+    // Window is monthsBack whole calendar months ending at the end of last month.
+    const end = dayjs().subtract(1, "month").endOf("month");
+    const start = dayjs().subtract(config.monthsBack, "month").startOf("month");
+    const from = start.format("YYYY-MM-DD");
+    const to = end.format("YYYY-MM-DD");
 
-    // Compare against the same number of elapsed days in the immediately preceding period
-    // (e.g. the first 15 days of this month vs the first 15 days of last month), not a full
-    // prior period — otherwise a partially-elapsed current period always looks like a decline.
-    const elapsedDays = today.diff(periodStart, "day") + 1;
-    const prevStart = periodStart.subtract(1, config.startOfUnit);
-    const prevEnd = prevStart.add(elapsedDays - 1, "day");
+    // Compare against the same number of whole months immediately preceding this window.
+    const prevEnd = start.subtract(1, "day");
+    const prevStart = start.subtract(config.monthsBack, "month");
     const prevFrom = prevStart.format("YYYY-MM-DD");
     const prevTo = prevEnd.format("YYYY-MM-DD");
 
@@ -136,9 +136,9 @@ export function Dashboard() {
           size="small"
           onChange={(_, v: Range | null) => v && setRange(v)}
         >
-          <ToggleButton value="day">Day</ToggleButton>
-          <ToggleButton value="week">Week</ToggleButton>
-          <ToggleButton value="month">Month</ToggleButton>
+          <ToggleButton value="lastMonth">Last Month</ToggleButton>
+          <ToggleButton value="last3Months">Last 3 Months</ToggleButton>
+          <ToggleButton value="last6Months">Last 6 Months</ToggleButton>
           <ToggleButton value="year">Year</ToggleButton>
         </ToggleButtonGroup>
       </Stack>
