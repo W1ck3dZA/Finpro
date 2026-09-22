@@ -27,7 +27,7 @@ const CSV_COLUMNS: CsvColumn<Job>[] = [
   { header: "Budget", accessor: (j) => j.budget },
   { header: "Start Date", accessor: (j) => (j.startDate ? formatDate(j.startDate) : "") },
   { header: "Completed Date", accessor: (j) => (j.completedDate ? formatDate(j.completedDate) : "") },
-  { header: "Status", accessor: (j) => (j.isStub ? "Incomplete" : "Complete") },
+  { header: "Import Status", accessor: (j) => (j.isStub ? "Incomplete" : "Complete") },
 ];
 
 export function Jobs() {
@@ -120,8 +120,8 @@ export function Jobs() {
     { field: "budget", headerName: "Budget", width: 110 },
     {
       field: "isStub",
-      headerName: "Status",
-      width: 130,
+      headerName: "Import Status",
+      width: 140,
       renderCell: (params) =>
         params.value ? (
           <Chip label="Incomplete" size="small" color="warning" />
@@ -153,7 +153,7 @@ export function Jobs() {
               <MenuItem key={s} value={s}>{s}</MenuItem>
             ))}
           </TextField>
-          <TextField select size="small" label="Status" value={status} onChange={(e) => setStatus(e.target.value)} sx={{ width: 150 }}>
+          <TextField select size="small" label="Import Status" value={status} onChange={(e) => setStatus(e.target.value)} sx={{ width: 150 }}>
             <MenuItem value="">All</MenuItem>
             <MenuItem value="complete">Complete</MenuItem>
             <MenuItem value="incomplete">Incomplete</MenuItem>

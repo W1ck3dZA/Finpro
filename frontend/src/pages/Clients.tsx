@@ -18,7 +18,7 @@ const CSV_COLUMNS: CsvColumn<Client>[] = [
   { header: "Tax Number", accessor: (c) => c.taxNumber },
   { header: "Company Number", accessor: (c) => c.companyNumber },
   { header: "Country", accessor: (c) => c.country },
-  { header: "Status", accessor: (c) => (c.isStub ? "Incomplete" : "Complete") },
+  { header: "Import Status", accessor: (c) => (c.isStub ? "Incomplete" : "Complete") },
 ];
 
 export function Clients() {
@@ -81,8 +81,8 @@ export function Clients() {
     { field: "email", headerName: "Email", flex: 1 },
     {
       field: "isStub",
-      headerName: "Status",
-      width: 120,
+      headerName: "Import Status",
+      width: 140,
       renderCell: (params) => (params.value ? <Chip label="Incomplete" size="small" color="warning" /> : <Chip label="Complete" size="small" color="success" variant="outlined" />),
     },
   ];

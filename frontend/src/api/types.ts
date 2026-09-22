@@ -219,6 +219,10 @@ export interface CtcVsTargetRow {
   c2cPm: number | null;
   target: number | null;
   variance: number | null;
+  hours: number;
+  hourlyRate: number | null;
+  rateCost: number | null;
+  profit: number | null;
 }
 
 export interface CtcVsTargetTotals {
@@ -229,6 +233,9 @@ export interface CtcVsTargetTotals {
   c2cPm: number;
   target: number;
   variance: number;
+  hours: number;
+  rateCost: number;
+  profit: number;
 }
 
 export interface CtcVsTargetResponse {
@@ -247,6 +254,8 @@ export interface CtcVsTargetBreakdownRow {
   sharePct: number;
   budget: number;
   fee: number;
+  actualCost: number | null;
+  profit: number | null;
 }
 
 export interface CtcVsTargetBreakdownResponse {
