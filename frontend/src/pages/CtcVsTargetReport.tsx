@@ -50,8 +50,8 @@ function initials(name: string): string {
     .join("");
 }
 
-type SortField = "staffName" | "fee" | "expenses" | "netFee" | "average" | "c2cPm" | "target" | "variance";
-type BreakdownSortField = "job" | "staffHours" | "totalHours" | "sharePct" | "budget" | "fee";
+type SortField = "staffName" | "fee" | "expenses" | "netFee" | "average" | "c2cPm" | "target" | "variance" | "rateCost" | "profit";
+type BreakdownSortField = "job" | "staffHours" | "totalHours" | "sharePct" | "budget" | "fee" | "actualCost" | "profit";
 
 /** Sortable column header, optionally with a hover tooltip explaining exactly how that figure is
  * calculated. The sort arrow and the info icon (when present) are independently
@@ -92,32 +92,36 @@ function SortableHeader<F extends string>({
   );
 }
 
-/** Average − Target, in the accounting sign convention: a positive value means the staff member
- * is exceeding target (profit), so it's flagged green; negative means they're falling short
- * (loss), flagged red. Shown as both the signed amount and a "Making Target" / "Below Target"
- * chip so it reads clearly at a glance, not just from color (which alone wouldn't be accessible
- * to colorblind users). */
-function VarianceCell({ variance, bold }: { variance: number | null; bold?: boolean }) {
-  if (variance === null) {
+/** A signed money figure flagged green when non-negative, red when negative, shown as both the
+ * amount and a labelled chip so it reads clearly at a glance, not just from color (which alone
+ * wouldn't be accessible to colorblind users). Shared by Variance (Average − Target) and Profit
+ * (Fee − Rate Cost), which follow the same "positive is good, negative is a loss" convention. */
+function SignedMoneyCell({
+  value,
+  bold,
+  positiveLabel,
+  negativeLabel,
+}: {
+  value: number | null;
+  bold?: boolean;
+  positiveLabel: string;
+  negativeLabel: string;
+}) {
+  if (value === null) {
     return <TableCell align="right">—</TableCell>;
   }
-  const onTarget = variance >= 0;
+  const positive = value >= 0;
   return (
     <TableCell align="right">
       <Stack direction="row" spacing={1} sx={{ justifyContent: "flex-end", alignItems: "center" }}>
         <Typography
           variant="body2"
           component="span"
-          sx={{ color: onTarget ? "success.main" : "error.main", fontWeight: bold ? 700 : 600 }}
+          sx={{ color: positive ? "success.main" : "error.main", fontWeight: bold ? 700 : 600 }}
         >
-          {money(variance)}
+          {money(value)}
         </Typography>
-        <Chip
-          size="small"
-          variant="outlined"
-          color={onTarget ? "success" : "error"}
-          label={onTarget ? "Making Target" : "Below Target"}
-        />
+        <Chip size="small" variant="outlined" color={positive ? "success" : "error"} label={positive ? positiveLabel : negativeLabel} />
       </Stack>
     </TableCell>
   );
@@ -162,11 +166,15 @@ function FeeBreakdownDialog({
     const dir = order === "asc" ? 1 : -1;
     return [...filtered].sort((a, b) => {
       if (orderBy === "job") return (a.jobName ?? a.jobNo).localeCompare(b.jobName ?? b.jobNo) * dir;
-      return (a[orderBy] - b[orderBy]) * dir;
+      const av = a[orderBy] ?? -Infinity;
+      const bv = b[orderBy] ?? -Infinity;
+      return (av - bv) * dir;
     });
   }, [rows, search, orderBy, order]);
 
   const totalFee = displayedRows.reduce((sum, r) => sum + r.fee, 0);
+  const totalActualCost = displayedRows.reduce((sum, r) => sum + (r.actualCost ?? 0), 0);
+  const totalProfit = displayedRows.reduce((sum, r) => sum + (r.profit ?? 0), 0);
   const dateRangeLabel =
     filters.from && filters.to ? `${dayjs(filters.from).format("D MMM YYYY")} – ${dayjs(filters.to).format("D MMM YYYY")}` : "selected range";
 
@@ -241,12 +249,28 @@ function FeeBreakdownDialog({
                     />
                     <SortableHeader label="Budget" field="budget" orderBy={orderBy} order={order} onSort={handleSort} />
                     <SortableHeader label="Allocated Fee" field="fee" orderBy={orderBy} order={order} onSort={handleSort} />
+                    <SortableHeader
+                      label="Actual Cost"
+                      tip="This job's hours you logged × your Hourly Rate — what it cost regardless of the job's budget."
+                      field="actualCost"
+                      orderBy={orderBy}
+                      order={order}
+                      onSort={handleSort}
+                    />
+                    <SortableHeader
+                      label="Profit"
+                      tip="Allocated Fee minus Actual Cost for this job. Negative when the job had no (or too small a) budget to cover the time logged — the client wasn't billed for it."
+                      field="profit"
+                      orderBy={orderBy}
+                      order={order}
+                      onSort={handleSort}
+                    />
                   </TableRow>
                 </TableHead>
                 <TableBody>
                   {displayedRows.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={5}>
+                      <TableCell colSpan={7}>
                         <Typography color="text.secondary" sx={{ py: 2, textAlign: "center" }}>
                           No jobs match "{search}".
                         </Typography>
@@ -283,6 +307,8 @@ function FeeBreakdownDialog({
                         <TableCell align="right" sx={{ fontWeight: 600, color: "primary.main" }}>
                           {money(r.fee)}
                         </TableCell>
+                        <TableCell align="right">{money(r.actualCost)}</TableCell>
+                        <SignedMoneyCell value={r.profit} positiveLabel="Profit" negativeLabel="Loss" />
                       </TableRow>
                     ))
                   )}
@@ -291,6 +317,8 @@ function FeeBreakdownDialog({
                   <TableRow>
                     <TableCell colSpan={4} sx={{ fontWeight: 600 }}>Total Fee</TableCell>
                     <TableCell align="right" sx={{ fontWeight: 600 }}>{money(totalFee)}</TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 600 }}>{money(totalActualCost)}</TableCell>
+                    <SignedMoneyCell value={totalProfit} bold positiveLabel="Profit" negativeLabel="Loss" />
                   </TableRow>
                 </TableFooter>
               </Table>
@@ -319,8 +347,11 @@ function computeTotals(rows: CtcVsTargetRow[]) {
       c2cPm: acc.c2cPm + (r.c2cPm ?? 0),
       target: acc.target + (r.target ?? 0),
       variance: acc.variance + (r.variance ?? 0),
+      hours: acc.hours + r.hours,
+      rateCost: acc.rateCost + (r.rateCost ?? 0),
+      profit: acc.profit + (r.profit ?? 0),
     }),
-    { fee: 0, expenses: 0, netFee: 0, average: 0, c2cPm: 0, target: 0, variance: 0 },
+    { fee: 0, expenses: 0, netFee: 0, average: 0, c2cPm: 0, target: 0, variance: 0, hours: 0, rateCost: 0, profit: 0 },
   );
 }
 
@@ -334,6 +365,9 @@ function csvColumns(monthCount: number): CsvColumn<CtcVsTargetRow>[] {
     { header: "C2C pm", accessor: (r) => r.c2cPm },
     { header: "Target (x3)", accessor: (r) => r.target },
     { header: "Average - Target", accessor: (r) => r.variance },
+    { header: "Hours", accessor: (r) => r.hours },
+    { header: "Rate Cost (Rate x Hours)", accessor: (r) => r.rateCost },
+    { header: "Profit (Fee - Rate Cost)", accessor: (r) => r.profit },
   ];
 }
 
@@ -408,9 +442,11 @@ export function CtcVsTargetReport() {
       <Alert severity="info" variant="outlined" sx={{ mb: 2 }}>
         Compares what each staff member has earned against their cost to company (CTC) for the selected date range.
         Fee is a share of each job's budget: for every job worked in the range, a staff member is credited their
-        share of the logged hours × that job's budget — not a flat hourly rate. Hover the info icon on a column
-        header for its exact formula, or click a row to see the job-by-job breakdown behind its Fee. Set monthly
-        CTC and monthly expenses per staff member on the Staff Rates page.
+        share of the logged hours × that job's budget — not a flat hourly rate. Profit is Fee minus Rate Cost
+        (Hourly Rate × hours worked): on jobs with no budget set, the client was never billed for that time, so
+        it shows as a loss instead of being ignored. Hover the info icon on a column header for its exact formula,
+        or click a row to see the job-by-job breakdown behind its Fee and Profit. Set Hourly Rate, monthly CTC and
+        monthly expenses per staff member on the Staff Rates page.
       </Alert>
       <ReportFilterBar value={filters} onChange={setFilters} />
 
@@ -506,12 +542,28 @@ export function CtcVsTargetReport() {
                   order={order}
                   onSort={handleSort}
                 />
+                <SortableHeader
+                  label="Rate Cost"
+                  tip="Hourly Rate (set on Staff Rates) × total hours logged in the selected range — a flat-rate cost figure, unlike Fee which is a share of each job's budget."
+                  field="rateCost"
+                  orderBy={orderBy}
+                  order={order}
+                  onSort={handleSort}
+                />
+                <SortableHeader
+                  label="Profit"
+                  tip="Fee minus Rate Cost. On jobs with no budget set, Fee credits nothing for the time logged, so the staff cost comes straight off here as a loss — this is what it actually cost to have unbilled time worked."
+                  field="profit"
+                  orderBy={orderBy}
+                  order={order}
+                  onSort={handleSort}
+                />
               </TableRow>
             </TableHead>
             <TableBody>
               {displayedRows.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={8}>
+                  <TableCell colSpan={10}>
                     <Typography color="text.secondary" sx={{ py: 2, textAlign: "center" }}>
                       No staff members match the current filters.
                     </Typography>
@@ -532,7 +584,9 @@ export function CtcVsTargetReport() {
                     <TableCell align="right">{money(row.average)}</TableCell>
                     <TableCell align="right">{money(row.c2cPm)}</TableCell>
                     <TableCell align="right">{money(row.target)}</TableCell>
-                    <VarianceCell variance={row.variance} />
+                    <SignedMoneyCell value={row.variance} positiveLabel="Making Target" negativeLabel="Below Target" />
+                    <TableCell align="right">{money(row.rateCost)}</TableCell>
+                    <SignedMoneyCell value={row.profit} positiveLabel="Profit" negativeLabel="Loss" />
                   </TableRow>
                 ))
               )}
@@ -546,7 +600,9 @@ export function CtcVsTargetReport() {
                 <TableCell align="right" sx={{ fontWeight: 600 }}>{money(footerTotals.average)}</TableCell>
                 <TableCell align="right" sx={{ fontWeight: 600 }}>{money(footerTotals.c2cPm)}</TableCell>
                 <TableCell align="right" sx={{ fontWeight: 600 }}>{money(footerTotals.target)}</TableCell>
-                <VarianceCell variance={footerTotals.variance} bold />
+                <SignedMoneyCell value={footerTotals.variance} bold positiveLabel="Making Target" negativeLabel="Below Target" />
+                <TableCell align="right" sx={{ fontWeight: 600 }}>{money(footerTotals.rateCost)}</TableCell>
+                <SignedMoneyCell value={footerTotals.profit} bold positiveLabel="Profit" negativeLabel="Loss" />
               </TableRow>
             </TableFooter>
           </Table>

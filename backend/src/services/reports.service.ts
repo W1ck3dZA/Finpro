@@ -384,6 +384,18 @@ export interface CtcVsTargetRow {
   /** Average minus Target, in the accounting sign convention: positive means the staff member is
    * exceeding target (profit), negative means they're falling short (loss). Null when no target is set. */
   variance: number | null;
+  /** Hours logged ÷ 60 across all jobs in the selected range, regardless of job budget — the same
+   * hours total Fee is built from, but used here against a flat rate instead of a budget share. */
+  hours: number;
+  hourlyRate: number | null;
+  /** Hourly Rate × Hours — a flat-rate cost figure independent of job budgets, unlike Fee. Null
+   * when the staff member has no hourly rate set. */
+  rateCost: number | null;
+  /** Fee minus Rate Cost. On jobs with no budget set, Fee's share of that job is 0, so the staff
+   * member's rate-based cost on it comes straight off Profit as a loss — this is what actually
+   * happens when time is billed to a job the client was never charged for. Null when Rate Cost is
+   * null (no hourly rate set), matching how Variance is null without a target. */
+  profit: number | null;
 }
 
 export interface CtcVsTargetTotals {
@@ -394,6 +406,9 @@ export interface CtcVsTargetTotals {
   c2cPm: number;
   target: number;
   variance: number;
+  hours: number;
+  rateCost: number;
+  profit: number;
 }
 
 export interface CtcVsTargetResult {
@@ -441,6 +456,15 @@ export async function getCtcVsTargetReport(filters: CtcVsTargetFilters): Promise
   const staffMembers = await prisma.staffMember.findMany({ where: { id: { in: feeRows.map((f) => f.staffMemberId) } } });
   const staffMap = new Map(staffMembers.map((s) => [s.id, s]));
 
+  // Hours logged per staff member across the same range, independent of which job/budget it was
+  // logged against — this is what Rate Cost is measured against, instead of a job budget share.
+  const hoursGrouped = await prisma.timesheet.groupBy({
+    by: ["staffMemberId"],
+    where: timesheetWhere(filters),
+    _sum: { minutes: true },
+  });
+  const hoursMap = new Map(hoursGrouped.map((h) => [h.staffMemberId, (h._sum.minutes ?? 0) / 60]));
+
   const rows: CtcVsTargetRow[] = feeRows.map((f) => {
     const member = staffMap.get(f.staffMemberId);
     const fee = Number(f.fee);
@@ -448,6 +472,9 @@ export async function getCtcVsTargetReport(filters: CtcVsTargetFilters): Promise
     const target = c2cPm != null ? c2cPm * 3 : null;
     const expenses = member?.monthlyExpenses != null ? Number(member.monthlyExpenses) * monthCount : null;
     const average = fee / monthCount;
+    const hours = hoursMap.get(f.staffMemberId) ?? 0;
+    const hourlyRate = member?.hourlyRate != null ? Number(member.hourlyRate) : null;
+    const rateCost = hourlyRate != null ? hours * hourlyRate : null;
     return {
       staffMemberId: f.staffMemberId,
       staffName: member?.name ?? "Unknown",
@@ -458,6 +485,10 @@ export async function getCtcVsTargetReport(filters: CtcVsTargetFilters): Promise
       c2cPm,
       target,
       variance: target != null ? average - target : null,
+      hours,
+      hourlyRate,
+      rateCost,
+      profit: rateCost != null ? fee - rateCost : null,
     };
   });
   rows.sort((a, b) => b.fee - a.fee);
@@ -471,8 +502,11 @@ export async function getCtcVsTargetReport(filters: CtcVsTargetFilters): Promise
       c2cPm: acc.c2cPm + (r.c2cPm ?? 0),
       target: acc.target + (r.target ?? 0),
       variance: acc.variance + (r.variance ?? 0),
+      hours: acc.hours + r.hours,
+      rateCost: acc.rateCost + (r.rateCost ?? 0),
+      profit: acc.profit + (r.profit ?? 0),
     }),
-    { fee: 0, expenses: 0, netFee: 0, average: 0, c2cPm: 0, target: 0, variance: 0 },
+    { fee: 0, expenses: 0, netFee: 0, average: 0, c2cPm: 0, target: 0, variance: 0, hours: 0, rateCost: 0, profit: 0 },
   );
 
   return { rows, totals, monthCount };
@@ -488,6 +522,13 @@ export interface CtcVsTargetBreakdownRow {
   sharePct: number;
   budget: number;
   fee: number;
+  /** This staff member's Hourly Rate × their hours on this specific job — what it actually cost
+   * to have them work it, regardless of whether the job had a budget to bill against. */
+  actualCost: number | null;
+  /** Fee minus Actual Cost for this job. Negative on a no-budget job with logged time — the client
+   * was never charged for it, so the staff cost comes straight off as a loss. Null when the staff
+   * member has no hourly rate set. */
+  profit: number | null;
 }
 
 /** Per-job detail behind one staff member's Fee figure in getCtcVsTargetReport — the same
@@ -498,6 +539,9 @@ export async function getCtcVsTargetBreakdown(staffMemberId: number, filters: Ct
   if (filters.from) dateConditions.push(Prisma.sql`entryDate >= ${filters.from}`);
   if (filters.to) dateConditions.push(Prisma.sql`entryDate <= ${filters.to}`);
   const dateWhere = dateConditions.length > 0 ? Prisma.sql`AND ${Prisma.join(dateConditions, " AND ")}` : Prisma.empty;
+
+  const staffMember = await prisma.staffMember.findUnique({ where: { id: staffMemberId } });
+  const hourlyRate = staffMember?.hourlyRate != null ? Number(staffMember.hourlyRate) : null;
 
   const rows = await prisma.$queryRaw<
     { jobId: number; jobNo: string; jobName: string | null; clientName: string; staffHours: number; totalHours: number; budget: number }[]
@@ -526,6 +570,8 @@ export async function getCtcVsTargetBreakdown(staffMemberId: number, filters: Ct
       const totalHours = Number(r.totalHours);
       const budget = Number(r.budget);
       const sharePct = totalHours > 0 ? (staffHours / totalHours) * 100 : 0;
+      const fee = (staffHours / totalHours) * budget;
+      const actualCost = hourlyRate != null ? staffHours * hourlyRate : null;
       return {
         jobId: r.jobId,
         jobNo: r.jobNo,
@@ -535,7 +581,9 @@ export async function getCtcVsTargetBreakdown(staffMemberId: number, filters: Ct
         totalHours,
         sharePct,
         budget,
-        fee: (staffHours / totalHours) * budget,
+        fee,
+        actualCost,
+        profit: actualCost != null ? fee - actualCost : null,
       };
     })
     .sort((a, b) => b.fee - a.fee);
