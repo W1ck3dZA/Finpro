@@ -178,6 +178,15 @@ function FeeBreakdownDialog({
   const dateRangeLabel =
     filters.from && filters.to ? `${dayjs(filters.from).format("D MMM YYYY")} – ${dayjs(filters.to).format("D MMM YYYY")}` : "selected range";
 
+  function handleExport() {
+    if (!rows) return;
+    exportRowsAsCsv(
+      `finpro-ctc-vs-target-${staff.staffName.replace(/\s+/g, "-").toLowerCase()}-breakdown-${new Date().toISOString().slice(0, 10)}.csv`,
+      displayedRows,
+      breakdownCsvColumns(),
+    );
+  }
+
   return (
     <Dialog open onClose={onClose} maxWidth="md" fullWidth>
       <DialogTitle sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 2 }}>
@@ -192,9 +201,12 @@ function FeeBreakdownDialog({
             </Typography>
           </Box>
         </Stack>
-        <IconButton onClick={onClose} size="small" sx={{ mt: 0.5 }}>
-          <CloseIcon fontSize="small" />
-        </IconButton>
+        <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+          {rows && rows.length > 0 && <ExportButton onExport={async () => handleExport()} label="Export CSV" />}
+          <IconButton onClick={onClose} size="small">
+            <CloseIcon fontSize="small" />
+          </IconButton>
+        </Stack>
       </DialogTitle>
       <DialogContent dividers>
         {rows === null ? (
@@ -353,6 +365,21 @@ function computeTotals(rows: CtcVsTargetRow[]) {
     }),
     { fee: 0, expenses: 0, netFee: 0, average: 0, c2cPm: 0, target: 0, variance: 0, hours: 0, rateCost: 0, profit: 0 },
   );
+}
+
+function breakdownCsvColumns(): CsvColumn<CtcVsTargetBreakdownRow>[] {
+  return [
+    { header: "Job No", accessor: (r) => r.jobNo },
+    { header: "Job Name", accessor: (r) => r.jobName },
+    { header: "Client", accessor: (r) => r.clientName },
+    { header: "Your Hours", accessor: (r) => r.staffHours },
+    { header: "Total Hours", accessor: (r) => r.totalHours },
+    { header: "Your Share (%)", accessor: (r) => r.sharePct },
+    { header: "Budget", accessor: (r) => r.budget },
+    { header: "Allocated Fee", accessor: (r) => r.fee },
+    { header: "Actual Cost", accessor: (r) => r.actualCost },
+    { header: "Profit", accessor: (r) => r.profit },
+  ];
 }
 
 function csvColumns(monthCount: number): CsvColumn<CtcVsTargetRow>[] {
