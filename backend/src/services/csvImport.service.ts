@@ -55,6 +55,17 @@ interface TypeImportResult {
   summary: ImportSummaryItem[];
 }
 
+// Client.name, Job.jobNo, and StaffMember.name are unique columns with no explicit collation
+// override, so under MariaDB/MySQL's default case-insensitive collation, "ABC Trading" and
+// "abc trading" collide as the same value at the DB level. The JS-side Maps below cache id
+// lookups to avoid N+1 queries, but a plain Map is case-sensitive — so a name whose casing
+// differs even slightly between rows/files (or between the CSV and what's already in the DB)
+// would silently fail to resolve, leaving a null FK that then blows up the raw INSERT. Every
+// lookup/dedup key here is lowercased to match the DB's actual matching behaviour.
+function normalizeKey(name: string): string {
+  return name.toLowerCase();
+}
+
 function parseYesNo(raw: string | undefined): boolean | null {
   const v = raw?.trim().toLowerCase();
   if (v === "yes") return true;
@@ -185,11 +196,13 @@ async function importJobs(records: Record<string, string>[]): Promise<TypeImport
   let skipped = 0;
 
   const existingClients = await prisma.client.findMany({ select: { id: true, name: true } });
-  const clientMap = new Map(existingClients.map((c) => [c.name, c.id]));
-  const existingJobNos = new Set((await prisma.job.findMany({ select: { jobNo: true } })).map((j) => j.jobNo));
+  const clientMap = new Map(existingClients.map((c) => [normalizeKey(c.name), c.id]));
+  const existingJobNos = new Set(
+    (await prisma.job.findMany({ select: { jobNo: true } })).map((j) => normalizeKey(j.jobNo)),
+  );
 
   const parsedRows: ParsedJobRow[] = [];
-  const missingClientNames = new Set<string>();
+  const missingClientNames = new Map<string, string>(); // normalized name -> original casing (first seen)
 
   records.forEach((row, i) => {
     const rowNum = i + 1;
@@ -200,7 +213,8 @@ async function importJobs(records: Record<string, string>[]): Promise<TypeImport
       sink.push({ row: rowNum, code: "MISSING_REQUIRED_FIELD", message: "Row skipped: missing Job No. or Client." });
       return;
     }
-    if (!clientMap.has(clientName)) missingClientNames.add(clientName);
+    const clientKey = normalizeKey(clientName);
+    if (!clientMap.has(clientKey) && !missingClientNames.has(clientKey)) missingClientNames.set(clientKey, clientName);
     parsedRows.push({
       jobNo,
       clientName,
@@ -216,15 +230,16 @@ async function importJobs(records: Record<string, string>[]): Promise<TypeImport
   const summary: ImportSummaryItem[] = [];
 
   if (missingClientNames.size > 0) {
+    const newNames = [...missingClientNames.values()];
     await prisma.client.createMany({
-      data: [...missingClientNames].map((name) => ({ name, isStub: true })),
+      data: newNames.map((name) => ({ name, isStub: true })),
       skipDuplicates: true,
     });
     const refreshed = await prisma.client.findMany({
-      where: { name: { in: [...missingClientNames] } },
+      where: { name: { in: newNames } },
       select: { id: true, name: true },
     });
-    refreshed.forEach((c) => clientMap.set(c.name, c.id));
+    refreshed.forEach((c) => clientMap.set(normalizeKey(c.name), c.id));
     summary.push({
       code: "CLIENTS_STUBBED",
       label: `${missingClientNames.size} client(s) referenced in this file didn't exist yet — placeholder client records were created. Review them on the Clients page.`,
@@ -233,25 +248,34 @@ async function importJobs(records: Record<string, string>[]): Promise<TypeImport
     sink.push({
       row: 0,
       code: "CLIENTS_STUBBED",
-      message: `Placeholder clients created: ${[...missingClientNames].slice(0, 20).join(", ")}${missingClientNames.size > 20 ? ", ..." : ""}`,
+      message: `Placeholder clients created: ${newNames.slice(0, 20).join(", ")}${newNames.length > 20 ? ", ..." : ""}`,
     });
+  }
+
+  // Rows whose client reference still couldn't be resolved (e.g. a stub-creation collision that
+  // findMany didn't catch) are skipped rather than inserted with a null clientId.
+  const resolvedRows = parsedRows.filter((r) => clientMap.has(normalizeKey(r.clientName)));
+  const unresolved = parsedRows.length - resolvedRows.length;
+  if (unresolved > 0) {
+    skipped += unresolved;
+    sink.push({ row: 0, code: "UNRESOLVED_REFERENCE", message: `${unresolved} row(s) could not be linked to a client and were skipped.` });
   }
 
   let inserted = 0;
   let updated = 0;
-  for (const r of parsedRows) {
-    if (existingJobNos.has(r.jobNo)) updated++;
+  for (const r of resolvedRows) {
+    if (existingJobNos.has(normalizeKey(r.jobNo))) updated++;
     else inserted++;
   }
 
   await prisma.$transaction(
     async (tx) => {
-      for (let i = 0; i < parsedRows.length; i += CHUNK_SIZE) {
-        const chunk = parsedRows.slice(i, i + CHUNK_SIZE);
+      for (let i = 0; i < resolvedRows.length; i += CHUNK_SIZE) {
+        const chunk = resolvedRows.slice(i, i + CHUNK_SIZE);
         const values = Prisma.join(
           chunk.map(
             (r) =>
-              Prisma.sql`(${r.jobNo}, ${clientMap.get(r.clientName)}, ${r.name}, ${r.startDate}, ${r.budget}, ${r.state}, ${r.completedDate}, ${r.actualTimeMinutes}, false, NOW(3), NOW(3))`,
+              Prisma.sql`(${r.jobNo}, ${clientMap.get(normalizeKey(r.clientName))}, ${r.name}, ${r.startDate}, ${r.budget}, ${r.state}, ${r.completedDate}, ${r.actualTimeMinutes}, false, NOW(3), NOW(3))`,
           ),
         );
         await tx.$executeRaw`
@@ -277,7 +301,7 @@ async function importJobs(records: Record<string, string>[]): Promise<TypeImport
   if (skipped > 0) {
     summary.push({
       code: "ROWS_SKIPPED",
-      label: `${skipped} row(s) were skipped due to a missing Job No. or Client`,
+      label: `${skipped} row(s) were skipped due to a missing or unresolvable Job No. or Client`,
       count: skipped,
     });
   }
@@ -304,14 +328,16 @@ async function importTimesheets(records: Record<string, string>[], importBatchId
   const sink = makeWarningSink(warnings);
   let skipped = 0;
 
-  const clientMap = new Map((await prisma.client.findMany({ select: { id: true, name: true } })).map((c) => [c.name, c.id]));
-  const jobMap = new Map((await prisma.job.findMany({ select: { id: true, jobNo: true } })).map((j) => [j.jobNo, j.id]));
-  const staffMap = new Map((await prisma.staffMember.findMany({ select: { id: true, name: true } })).map((s) => [s.name, s.id]));
+  const clientMap = new Map((await prisma.client.findMany({ select: { id: true, name: true } })).map((c) => [normalizeKey(c.name), c.id]));
+  const jobMap = new Map((await prisma.job.findMany({ select: { id: true, jobNo: true } })).map((j) => [normalizeKey(j.jobNo), j.id]));
+  const staffMap = new Map(
+    (await prisma.staffMember.findMany({ select: { id: true, name: true } })).map((s) => [normalizeKey(s.name), s.id]),
+  );
 
   const parsedRows: ParsedTimeRow[] = [];
-  const missingClientNames = new Set<string>();
-  const missingJobNos = new Map<string, string>(); // jobNo -> a client name to stub it with
-  const newStaffNames = new Set<string>();
+  const missingClientNames = new Map<string, string>(); // normalized name -> original casing
+  const missingJobNos = new Map<string, { jobNo: string; clientName: string }>(); // normalized jobNo -> original casing + client to stub it with
+  const newStaffNames = new Map<string, string>(); // normalized name -> original casing
 
   records.forEach((row, i) => {
     const rowNum = i + 1;
@@ -330,9 +356,12 @@ async function importTimesheets(records: Record<string, string>[], importBatchId
       return;
     }
 
-    if (!clientMap.has(clientName)) missingClientNames.add(clientName);
-    if (!jobMap.has(jobNo) && !missingJobNos.has(jobNo)) missingJobNos.set(jobNo, clientName);
-    if (!staffMap.has(staffName)) newStaffNames.add(staffName);
+    const clientKey = normalizeKey(clientName);
+    const jobKey = normalizeKey(jobNo);
+    const staffKey = normalizeKey(staffName);
+    if (!clientMap.has(clientKey) && !missingClientNames.has(clientKey)) missingClientNames.set(clientKey, clientName);
+    if (!jobMap.has(jobKey) && !missingJobNos.has(jobKey)) missingJobNos.set(jobKey, { jobNo, clientName });
+    if (!staffMap.has(staffKey) && !newStaffNames.has(staffKey)) newStaffNames.set(staffKey, staffName);
 
     parsedRows.push({ clientName, jobNo, staffName, entryDate, minutes, note });
   });
@@ -340,15 +369,16 @@ async function importTimesheets(records: Record<string, string>[], importBatchId
   const summary: ImportSummaryItem[] = [];
 
   if (missingClientNames.size > 0) {
+    const newNames = [...missingClientNames.values()];
     await prisma.client.createMany({
-      data: [...missingClientNames].map((name) => ({ name, isStub: true })),
+      data: newNames.map((name) => ({ name, isStub: true })),
       skipDuplicates: true,
     });
     const refreshed = await prisma.client.findMany({
-      where: { name: { in: [...missingClientNames] } },
+      where: { name: { in: newNames } },
       select: { id: true, name: true },
     });
-    refreshed.forEach((c) => clientMap.set(c.name, c.id));
+    refreshed.forEach((c) => clientMap.set(normalizeKey(c.name), c.id));
     summary.push({
       code: "CLIENTS_STUBBED",
       label: `${missingClientNames.size} client(s) referenced in this file didn't exist yet — placeholder client records were created.`,
@@ -357,20 +387,20 @@ async function importTimesheets(records: Record<string, string>[], importBatchId
   }
 
   if (missingJobNos.size > 0) {
-    const stubJobsData = [...missingJobNos.entries()]
-      .filter(([, clientName]) => clientMap.has(clientName))
-      .map(([jobNo, clientName]) => ({
+    const stubJobsData = [...missingJobNos.values()]
+      .filter(({ clientName }) => clientMap.has(normalizeKey(clientName)))
+      .map(({ jobNo, clientName }) => ({
         jobNo,
-        clientId: clientMap.get(clientName)!,
+        clientId: clientMap.get(normalizeKey(clientName))!,
         state: "Unknown",
         isStub: true,
       }));
     await prisma.job.createMany({ data: stubJobsData, skipDuplicates: true });
     const refreshed = await prisma.job.findMany({
-      where: { jobNo: { in: [...missingJobNos.keys()] } },
+      where: { jobNo: { in: stubJobsData.map((j) => j.jobNo) } },
       select: { id: true, jobNo: true },
     });
-    refreshed.forEach((j) => jobMap.set(j.jobNo, j.id));
+    refreshed.forEach((j) => jobMap.set(normalizeKey(j.jobNo), j.id));
     summary.push({
       code: "JOBS_STUBBED",
       label: `${missingJobNos.size} timesheet entries referenced a Job No. that doesn't exist yet — placeholder job records were created. Review them on the Jobs page.`,
@@ -379,16 +409,17 @@ async function importTimesheets(records: Record<string, string>[], importBatchId
   }
 
   if (newStaffNames.size > 0) {
+    const newNames = [...newStaffNames.values()];
     await prisma.staffMember.createMany({
-      data: [...newStaffNames].map((name) => ({ name })),
+      data: newNames.map((name) => ({ name })),
       skipDuplicates: true,
     });
     const refreshed = await prisma.staffMember.findMany({
-      where: { name: { in: [...newStaffNames] } },
+      where: { name: { in: newNames } },
       select: { id: true, name: true },
     });
-    refreshed.forEach((s) => staffMap.set(s.name, s.id));
-    const names = [...newStaffNames].slice(0, 10).join(", ") + (newStaffNames.size > 10 ? ", ..." : "");
+    refreshed.forEach((s) => staffMap.set(normalizeKey(s.name), s.id));
+    const names = newNames.slice(0, 10).join(", ") + (newNames.length > 10 ? ", ..." : "");
     summary.push({
       code: "STAFF_CREATED",
       label: `${newStaffNames.size} new staff member(s) were added from this file (${names}). Set their hourly rate on the Staff Rates page so cost reports are accurate.`,
@@ -398,7 +429,9 @@ async function importTimesheets(records: Record<string, string>[], importBatchId
 
   // Rows whose job/client reference still couldn't be resolved (e.g. a stub job's client was
   // itself unresolvable) are skipped rather than inserted with a broken FK.
-  const resolvedRows = parsedRows.filter((r) => clientMap.has(r.clientName) && jobMap.has(r.jobNo) && staffMap.has(r.staffName));
+  const resolvedRows = parsedRows.filter(
+    (r) => clientMap.has(normalizeKey(r.clientName)) && jobMap.has(normalizeKey(r.jobNo)) && staffMap.has(normalizeKey(r.staffName)),
+  );
   const unresolved = parsedRows.length - resolvedRows.length;
   if (unresolved > 0) {
     skipped += unresolved;
@@ -412,9 +445,9 @@ async function importTimesheets(records: Record<string, string>[], importBatchId
         const chunk = resolvedRows.slice(i, i + CHUNK_SIZE);
         await tx.timesheet.createMany({
           data: chunk.map((r) => ({
-            clientId: clientMap.get(r.clientName)!,
-            jobId: jobMap.get(r.jobNo)!,
-            staffMemberId: staffMap.get(r.staffName)!,
+            clientId: clientMap.get(normalizeKey(r.clientName))!,
+            jobId: jobMap.get(normalizeKey(r.jobNo))!,
+            staffMemberId: staffMap.get(normalizeKey(r.staffName))!,
             entryDate: r.entryDate,
             minutes: r.minutes,
             note: r.note,
